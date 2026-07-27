@@ -66,7 +66,7 @@ def create_app() -> FastAPI:
         """Return a simple liveness payload for platform health checks."""
         return {"status": "ok"}
 
-    @app.get("/images/{filename}")
+    @app.api_route("/images/{filename}", methods=["GET", "HEAD"])
     async def get_image(filename: str) -> FileResponse:
         """Serve a previously generated image by its stored file name.
 
