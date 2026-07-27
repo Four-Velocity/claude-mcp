@@ -16,14 +16,22 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Any
 
+from mcp.server.auth.provider import ProviderTokenVerifier
+from mcp.server.auth.settings import (
+    AuthSettings,
+    ClientRegistrationOptions,
+    RevocationOptions,
+)
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import Field
+from pydantic import AnyHttpUrl, Field
 from starlette.requests import Request
 
+from claude_mcp.auth import MCP_SCOPE, SingleUserOAuthProvider
+from claude_mcp.auth_store import AuthStore
 from claude_mcp.config import Settings, get_settings
 from claude_mcp.openai_client import OpenAIImageClient
-from claude_mcp.storage import ImageStore, default_storage_dir
+from claude_mcp.storage import ImageStore, default_auth_storage_path, default_storage_dir
 
 
 def _build_transport_security(settings: Settings) -> TransportSecuritySettings:
@@ -50,6 +58,65 @@ def _build_transport_security(settings: Settings) -> TransportSecuritySettings:
     return TransportSecuritySettings(enable_dns_rebinding_protection=False)
 
 
+def _build_auth_provider(settings: Settings) -> SingleUserOAuthProvider | None:
+    """Build the OAuth provider when a password is configured.
+
+    Args:
+        settings: The application settings.
+
+    Returns:
+        The provider, or ``None`` when no password is set (auth disabled).
+    """
+    if not settings.auth_enabled:
+        return None
+    assert settings.mcp_auth_password is not None  # guaranteed by auth_enabled
+    path = (
+        Path(settings.auth_storage_path)
+        if settings.auth_storage_path
+        else default_auth_storage_path()
+    )
+    return SingleUserOAuthProvider(
+        AuthStore(path),
+        password=settings.mcp_auth_password,
+        base_url=settings.issuer_url,
+        resource_url=settings.resource_url,
+        access_token_ttl=settings.access_token_ttl_minutes * 60.0,
+        refresh_token_ttl=settings.refresh_token_ttl_days * 86400.0,
+    )
+
+
+def _build_auth_settings(settings: Settings) -> AuthSettings | None:
+    """Build MCP ``AuthSettings`` describing this server as both AS and RS.
+
+    Dynamic Client Registration is enabled so Claude can connect without any
+    manually configured client id or secret.
+
+    Args:
+        settings: The application settings.
+
+    Returns:
+        The auth settings, or ``None`` when auth is disabled.
+    """
+    if not settings.auth_enabled:
+        return None
+    return AuthSettings(
+        issuer_url=AnyHttpUrl(settings.issuer_url),
+        resource_server_url=AnyHttpUrl(settings.resource_url),
+        client_registration_options=ClientRegistrationOptions(
+            enabled=True,
+            valid_scopes=[MCP_SCOPE],
+            default_scopes=[MCP_SCOPE],
+        ),
+        revocation_options=RevocationOptions(enabled=True),
+        # No required scopes: access is all-or-nothing for a single owner, and
+        # demanding a scope only adds a way for the handshake to fail.
+        required_scopes=None,
+    )
+
+
+_settings = get_settings()
+auth_provider: SingleUserOAuthProvider | None = _build_auth_provider(_settings)
+
 mcp: FastMCP = FastMCP(
     name="openai-image-generator",
     instructions=(
@@ -57,7 +124,10 @@ mcp: FastMCP = FastMCP(
         "Call `generate_image` with a descriptive prompt to receive a rendered image."
     ),
     stateless_http=True,
-    transport_security=_build_transport_security(get_settings()),
+    transport_security=_build_transport_security(_settings),
+    auth_server_provider=auth_provider,
+    token_verifier=ProviderTokenVerifier(auth_provider) if auth_provider else None,
+    auth=_build_auth_settings(_settings),
 )
 
 _image_client: OpenAIImageClient | None = None

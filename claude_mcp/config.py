@@ -39,6 +39,14 @@ class Settings(BaseSettings):
             ``claude-mcp-images`` folder inside the system temp directory.
         image_retention_minutes: Age after which stored images are pruned. Set to
             ``0`` to disable pruning.
+        mcp_auth_password: Password that authorizes a Claude connection via OAuth.
+            When unset, the MCP endpoint is left unauthenticated (useful for local
+            development); when set, ``public_base_url`` is required because OAuth
+            metadata must advertise a stable issuer.
+        auth_storage_path: JSON file holding OAuth clients and tokens. Defaults to
+            ``claude-mcp-oauth.json`` inside the system temp directory.
+        access_token_ttl_minutes: Access token lifetime in minutes.
+        refresh_token_ttl_days: Refresh token lifetime in days.
     """
 
     model_config = SettingsConfigDict(
@@ -58,6 +66,10 @@ class Settings(BaseSettings):
     public_base_url: str = Field(default="")
     image_storage_dir: str = Field(default="")
     image_retention_minutes: float = Field(default=60.0, ge=0)
+    mcp_auth_password: str | None = Field(default=None)
+    auth_storage_path: str = Field(default="")
+    access_token_ttl_minutes: float = Field(default=60.0, gt=0)
+    refresh_token_ttl_days: float = Field(default=30.0, gt=0)
 
     @property
     def allowed_hosts(self) -> list[str]:
@@ -68,6 +80,37 @@ class Settings(BaseSettings):
     def allowed_origins(self) -> list[str]:
         """Return ``mcp_allowed_origins`` parsed into a list of trimmed values."""
         return [item.strip() for item in self.mcp_allowed_origins.split(",") if item.strip()]
+
+    @property
+    def auth_enabled(self) -> bool:
+        """Return whether OAuth protection of the MCP endpoint is configured."""
+        return bool(self.mcp_auth_password)
+
+    @property
+    def issuer_url(self) -> str:
+        """Return the OAuth issuer URL (the public base URL, without trailing slash).
+
+        Returns:
+            The configured ``public_base_url`` with any trailing slash removed.
+
+        Raises:
+            ValueError: If authentication is enabled but ``public_base_url`` is unset,
+                since OAuth discovery metadata requires a stable, absolute issuer.
+        """
+        if not self.public_base_url:
+            raise ValueError(
+                "PUBLIC_BASE_URL must be set when MCP_AUTH_PASSWORD is configured "
+                "(OAuth metadata needs a stable issuer URL, e.g. https://example.com)."
+            )
+        return self.public_base_url.rstrip("/")
+
+    @property
+    def resource_url(self) -> str:
+        """Return the canonical resource identifier of the MCP endpoint.
+
+        This must match the URL entered in Claude exactly, including the path.
+        """
+        return f"{self.issuer_url}/mcp"
 
 
 @lru_cache(maxsize=1)

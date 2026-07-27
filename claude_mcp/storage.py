@@ -37,6 +37,11 @@ def default_storage_dir() -> Path:
     return Path(tempfile.gettempdir()) / "claude-mcp-images"
 
 
+def default_auth_storage_path() -> Path:
+    """Return the default OAuth state file path inside the system temp dir."""
+    return Path(tempfile.gettempdir()) / "claude-mcp-oauth.json"
+
+
 class ImageStore:
     """Persist generated images to a directory and prune expired ones."""
 
