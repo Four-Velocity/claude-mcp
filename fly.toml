@@ -8,6 +8,7 @@ primary_region = "iad"
 
 [env]
   PORT = "8080"
+  IMAGE_STORAGE_DIR = "/data/images"
 
 [http_service]
   internal_port = 8080
@@ -23,6 +24,13 @@ primary_region = "iad"
     method = "GET"
     path = "/health"
 
+# A single 2GB volume for generated images. Volumes pin the app to one
+# machine on one host, which matches the single-machine setup requested here.
+[[mounts]]
+  source = "claude_mcp_images"
+  destination = "/data/images"
+  initial_size = "2gb"
+
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "512mb"
+  memory = "256mb"
