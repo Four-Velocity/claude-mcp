@@ -16,7 +16,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Any
 
-from mcp.server.auth.provider import ProviderTokenVerifier
 from mcp.server.auth.settings import (
     AuthSettings,
     ClientRegistrationOptions,
@@ -125,8 +124,9 @@ mcp: FastMCP = FastMCP(
     ),
     stateless_http=True,
     transport_security=_build_transport_security(_settings),
+    # Only the provider is passed: FastMCP rejects receiving both, and derives the
+    # token verifier from the provider itself.
     auth_server_provider=auth_provider,
-    token_verifier=ProviderTokenVerifier(auth_provider) if auth_provider else None,
     auth=_build_auth_settings(_settings),
 )
 

@@ -113,7 +113,9 @@ def create_app() -> FastAPI:
             """
             return HTMLResponse(render_login_page(rid), headers={"Cache-Control": "no-store"})
 
-        @app.post("/login")
+        # response_model=None: the return type is a union of Response subclasses,
+        # which FastAPI must not try to turn into a Pydantic response model.
+        @app.post("/login", response_model=None)
         async def login_submit(
             request: Request,
             rid: Annotated[str, Form()],
