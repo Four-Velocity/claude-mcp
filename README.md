@@ -9,8 +9,14 @@ model** and return it inline. Built with FastAPI, fully async, and deployable to
 
 - Serves an MCP server over **streamable HTTP** at `/mcp` (add it to Claude as a custom connector).
 - Exposes one tool, `generate_image(prompt, size, quality)`, which calls the OpenAI
-  **Image API** (`POST /v1/images/generations`) via an async `httpx` client and returns
-  the rendered PNG to Claude as image content.
+  **Image API** (`POST /v1/images/generations`) via an async `httpx` client.
+- **Stays under the ~1 MB MCP tool-response limit** (enforced by the Claude desktop and
+  mobile apps): instead of returning multi-megabyte base64 image bytes inline, it saves
+  the image to a local temp directory, serves it at `GET /images/{id}`, and returns a
+  small **Markdown image link**. Claude renders the Markdown and the image bytes load
+  directly over HTTP — never through the MCP channel. The image URL is auto-derived from
+  the request (honouring `X-Forwarded-Proto`/`Host`), so it works on localhost and Fly
+  without configuration; override with `PUBLIC_BASE_URL` if needed.
 - Adds a `/version` endpoint that reports the version read from `pyproject.toml` at startup.
 - Adds a `/health` endpoint for platform health checks.
 
@@ -21,8 +27,9 @@ model** and return it inline. Built with FastAPI, fully async, and deployable to
 | `claude_mcp/config.py` | Environment-based settings (`OPENAI_API_KEY`, host/port, allowed hosts). |
 | `claude_mcp/version.py` | Reads `[project].version` from `pyproject.toml`. |
 | `claude_mcp/openai_client.py` | Async OpenAI Image API client. |
+| `claude_mcp/storage.py` | Local temp-dir image storage + pruning. |
 | `claude_mcp/server.py` | `FastMCP` server + the `generate_image` tool. |
-| `claude_mcp/app.py` | FastAPI app: mounts MCP at `/mcp`, serves `/version` and `/health`. |
+| `claude_mcp/app.py` | FastAPI app: mounts MCP at `/mcp`, serves `/version`, `/health`, `/images/{id}`. |
 | `claude_mcp/__main__.py` | `python -m claude_mcp` entrypoint (uvicorn). |
 
 ## Requirements
@@ -89,3 +96,9 @@ Claude will then offer the `generate_image` tool.
 - **DNS-rebinding protection** is disabled by default so the server responds on the
   varying `*.fly.dev` host. To lock it to specific hosts, set `MCP_ALLOWED_HOSTS`
   (comma-separated), e.g. `MCP_ALLOWED_HOSTS=your-app.fly.dev`.
+- **Served image URLs are unauthenticated** and live in the (ephemeral) temp dir until
+  pruned (`IMAGE_RETENTION_MINUTES`, default 60). Anyone with a URL can fetch that image
+  during its lifetime.
+- **Multi-machine note:** images are stored on the machine that generated them. If you
+  scale to multiple Fly machines, a URL served by another machine will 404 — keep a
+  single machine, or back the store with a shared volume/object store.

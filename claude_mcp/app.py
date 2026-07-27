@@ -9,11 +9,13 @@ from __future__ import annotations
 import contextlib
 from collections.abc import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 
 from claude_mcp.config import get_settings
 from claude_mcp.openai_client import OpenAIImageClient
-from claude_mcp.server import close_image_client, mcp, set_image_client
+from claude_mcp.server import close_image_client, get_image_store, mcp, set_image_client
+from claude_mcp.storage import content_type_for
 from claude_mcp.version import read_version
 
 
@@ -63,6 +65,28 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         """Return a simple liveness payload for platform health checks."""
         return {"status": "ok"}
+
+    @app.get("/images/{filename}")
+    async def get_image(filename: str) -> FileResponse:
+        """Serve a previously generated image by its stored file name.
+
+        Args:
+            filename: The stored image file name from the generated Markdown link.
+
+        Returns:
+            The image file with an appropriate content type.
+
+        Raises:
+            HTTPException: 404 if the name is invalid or the file does not exist.
+        """
+        path = get_image_store().resolve(filename)
+        if path is None:
+            raise HTTPException(status_code=404, detail="Image not found")
+        return FileResponse(
+            path,
+            media_type=content_type_for(path),
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
 
     # Mount the MCP streamable-HTTP app last so the explicit routes above win.
     app.mount("/", mcp_app)

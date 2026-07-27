@@ -31,6 +31,14 @@ class Settings(BaseSettings):
             ``"myapp.fly.dev"``) to lock the server to specific hosts.
         mcp_allowed_origins: Comma-separated ``Origin`` header values permitted
             when DNS-rebinding protection is enabled.
+        public_base_url: Absolute base URL (e.g. ``https://myapp.fly.dev``) used
+            to build image links returned by the tool. When empty the URL is
+            derived from the incoming request (honouring ``X-Forwarded-Proto`` /
+            ``Host``), falling back to ``http://localhost:<port>``.
+        image_storage_dir: Directory for generated image files. Defaults to a
+            ``claude-mcp-images`` folder inside the system temp directory.
+        image_retention_minutes: Age after which stored images are pruned. Set to
+            ``0`` to disable pruning.
     """
 
     model_config = SettingsConfigDict(
@@ -47,6 +55,9 @@ class Settings(BaseSettings):
     port: int = Field(default=8080, ge=1, le=65535)
     mcp_allowed_hosts: str = Field(default="")
     mcp_allowed_origins: str = Field(default="")
+    public_base_url: str = Field(default="")
+    image_storage_dir: str = Field(default="")
+    image_retention_minutes: float = Field(default=60.0, ge=0)
 
     @property
     def allowed_hosts(self) -> list[str]:

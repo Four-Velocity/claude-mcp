@@ -1,20 +1,29 @@
 """MCP server definition and the ``generate_image`` tool.
 
 The server is created with :class:`FastMCP` and served over streamable HTTP so it
-can be added to Claude as a custom connector. It intentionally exposes a single
-tool for now: generating an image with OpenAI's ``gpt-image-2`` model.
+can be added to Claude as a custom connector. It exposes a single tool that
+generates an image with OpenAI's ``gpt-image-2`` model.
+
+To stay within the ~1 MB MCP tool-response limit enforced by the Claude desktop
+and mobile apps, the tool does **not** return the (multi-megabyte) image inline.
+Instead it saves the image locally, serves it over HTTP, and returns a small
+Markdown image link that Claude renders — the image bytes are then loaded
+directly over HTTP rather than through the MCP channel.
 """
 
 from __future__ import annotations
 
-from typing import Annotated
+from pathlib import Path
+from typing import Annotated, Any
 
-from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
+from starlette.requests import Request
 
 from claude_mcp.config import Settings, get_settings
 from claude_mcp.openai_client import OpenAIImageClient
+from claude_mcp.storage import ImageStore, default_storage_dir
 
 
 def _build_transport_security(settings: Settings) -> TransportSecuritySettings:
@@ -52,6 +61,7 @@ mcp: FastMCP = FastMCP(
 )
 
 _image_client: OpenAIImageClient | None = None
+_image_store: ImageStore | None = None
 
 
 def set_image_client(client: OpenAIImageClient | None) -> None:
@@ -92,12 +102,78 @@ async def close_image_client() -> None:
         _image_client = None
 
 
+def set_image_store(store: ImageStore | None) -> None:
+    """Install the shared image store used by the tool and the image route.
+
+    Args:
+        store: The store to use, or ``None`` to reset the shared instance.
+    """
+    global _image_store
+    _image_store = store
+
+
+def get_image_store() -> ImageStore:
+    """Return the shared image store, creating it lazily from settings if needed.
+
+    Returns:
+        The process-wide :class:`~claude_mcp.storage.ImageStore`.
+    """
+    global _image_store
+    if _image_store is None:
+        settings = get_settings()
+        directory = (
+            Path(settings.image_storage_dir)
+            if settings.image_storage_dir
+            else default_storage_dir()
+        )
+        _image_store = ImageStore(directory, settings.image_retention_minutes * 60.0)
+    return _image_store
+
+
+def _resolve_base_url(settings: Settings, request: Request | None) -> str:
+    """Determine the absolute base URL used to build image links.
+
+    Preference order: an explicit ``PUBLIC_BASE_URL`` setting, then the incoming
+    request (honouring ``X-Forwarded-Proto`` so links are ``https`` behind the
+    Fly.io proxy), then a localhost fallback.
+
+    Args:
+        settings: Application settings (for the explicit override and port).
+        request: The incoming Starlette request, if available.
+
+    Returns:
+        A base URL without a trailing slash, e.g. ``https://myapp.fly.dev``.
+    """
+    if settings.public_base_url:
+        return settings.public_base_url.rstrip("/")
+    if request is not None:
+        host = request.headers.get("host")
+        if host:
+            proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+            return f"{proto}://{host}"
+    return f"http://localhost:{settings.port}"
+
+
+def _markdown_alt(text: str) -> str:
+    """Sanitise text for use inside a Markdown image alt (``![alt](url)``).
+
+    Args:
+        text: Raw prompt or revised-prompt text.
+
+    Returns:
+        A single-line, bracket-free string capped at 200 characters.
+    """
+    cleaned = " ".join(text.split()).replace("[", "").replace("]", "")
+    return cleaned[:200] or "generated image"
+
+
 @mcp.tool(
     title="Generate image",
     description="Generate an image from a text prompt using OpenAI's gpt-image-2 model.",
     structured_output=False,
 )
 async def generate_image(
+    ctx: Context[Any, Any, Any],
     prompt: Annotated[
         str,
         Field(description="A detailed text description of the image to generate."),
@@ -112,21 +188,36 @@ async def generate_image(
         str,
         Field(description="Rendering quality: 'low', 'medium', 'high', or 'auto'."),
     ] = "auto",
-) -> Image:
-    """Generate an image with ``gpt-image-2`` and return it to Claude.
+) -> str:
+    """Generate an image with ``gpt-image-2`` and return it as a Markdown link.
+
+    The image is saved to the server's local storage and served over HTTP; the
+    returned Markdown references it by URL so the response stays well under the
+    MCP tool-response size limit.
 
     Args:
+        ctx: The MCP request context (injected), used to derive the server URL.
         prompt: A detailed description of the desired image.
         size: Requested output resolution, or ``"auto"`` to let the model choose.
         quality: Rendering quality tier, or ``"auto"``.
 
     Returns:
-        An :class:`~mcp.server.fastmcp.Image` wrapping the PNG bytes, which the MCP
-        runtime converts into image content for Claude to display.
+        Markdown containing the rendered image and a direct link to it.
 
     Raises:
         OpenAIImageError: If the OpenAI Image API request fails or returns no image.
     """
-    client = get_image_client()
-    result = await client.generate_image(prompt=prompt, size=size, quality=quality)
-    return Image(data=result.data, format=result.image_format)
+    result = await get_image_client().generate_image(prompt=prompt, size=size, quality=quality)
+    name = await get_image_store().save(result.data, result.image_format)
+
+    try:
+        raw_request = ctx.request_context.request
+    except (ValueError, AttributeError):
+        # No HTTP request context (e.g. a direct in-process invocation).
+        raw_request = None
+    request = raw_request if isinstance(raw_request, Request) else None
+    base_url = _resolve_base_url(get_settings(), request)
+    url = f"{base_url}/images/{name}"
+
+    alt = _markdown_alt(result.revised_prompt or prompt)
+    return f"![{alt}]({url})\n\n[Open image]({url})"
